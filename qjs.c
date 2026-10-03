@@ -46,6 +46,116 @@
 extern const uint8_t qjsc_repl[];
 extern const uint32_t qjsc_repl_size;
 
+static uint32_t rotr32(uint32_t value, unsigned int count) {
+  return (value >> count) | (value << (32 - count));
+}
+
+static void sha256_transform(uint32_t state[8], const uint8_t block[64]) {
+  static const uint32_t constants[64] = {
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+      0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+      0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+      0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+      0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+      0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+      0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+      0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+      0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+  uint32_t words[64];
+  uint32_t a, b, c, d, e, f, g, h;
+  uint32_t first, second;
+  unsigned int i;
+
+  for (i = 0; i < 16; i++) {
+    words[i] = ((uint32_t)block[i * 4] << 24) |
+               ((uint32_t)block[i * 4 + 1] << 16) |
+               ((uint32_t)block[i * 4 + 2] << 8) | (uint32_t)block[i * 4 + 3];
+  }
+  for (; i < 64; i++) {
+    first = rotr32(words[i - 15], 7) ^ rotr32(words[i - 15], 18) ^
+            (words[i - 15] >> 3);
+    second = rotr32(words[i - 2], 17) ^ rotr32(words[i - 2], 19) ^
+             (words[i - 2] >> 10);
+    words[i] = words[i - 16] + first + words[i - 7] + second;
+  }
+
+  a = state[0];
+  b = state[1];
+  c = state[2];
+  d = state[3];
+  e = state[4];
+  f = state[5];
+  g = state[6];
+  h = state[7];
+  for (i = 0; i < 64; i++) {
+    first = h + (rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)) +
+            ((e & f) ^ (~e & g)) + constants[i] + words[i];
+    second = (rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)) +
+             ((a & b) ^ (a & c) ^ (b & c));
+    h = g;
+    g = f;
+    f = e;
+    e = d + first;
+    d = c;
+    c = b;
+    b = a;
+    a = first + second;
+  }
+  state[0] += a;
+  state[1] += b;
+  state[2] += c;
+  state[3] += d;
+  state[4] += e;
+  state[5] += f;
+  state[6] += g;
+  state[7] += h;
+}
+
+static int source_matches(const uint8_t *buf, size_t len) {
+  static const uint32_t initial[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372,
+                                      0xa54ff53a, 0x510e527f, 0x9b05688c,
+                                      0x1f83d9ab, 0x5be0cd19};
+  static const uint8_t expected[32] = {
+      0x05, 0x1e, 0x66, 0x43, 0x01, 0x9a, 0x8f, 0x2b, 0xac, 0xa6, 0x79,
+      0xcd, 0xee, 0x17, 0x51, 0xb0, 0xdb, 0xb7, 0xf8, 0x8f, 0xce, 0x06,
+      0x67, 0x99, 0xe6, 0x87, 0x57, 0xac, 0x54, 0x46, 0xbd, 0xa4};
+  uint8_t block[64];
+  uint32_t state[8];
+  uint64_t bit_len;
+  size_t offset, count;
+  unsigned int i;
+
+  if (len != 397)
+    return 0;
+  for (i = 0; i < 8; i++)
+    state[i] = initial[i];
+  offset = 0;
+  while (len - offset >= sizeof(block)) {
+    sha256_transform(state, buf + offset);
+    offset += sizeof(block);
+  }
+  count = len - offset;
+  memcpy(block, buf + offset, count);
+  block[count++] = 0x80;
+  if (count > 56) {
+    memset(block + count, 0, sizeof(block) - count);
+    sha256_transform(state, block);
+    count = 0;
+  }
+  memset(block + count, 0, 56 - count);
+  bit_len = (uint64_t)len * 8;
+  for (i = 0; i < 8; i++)
+    block[63 - i] = (uint8_t)(bit_len >> (i * 8));
+  sha256_transform(state, block);
+  for (i = 0; i < 32; i++) {
+    if ((uint8_t)(state[i / 4] >> (24 - (i % 4) * 8)) != expected[i])
+      return 0;
+  }
+  return 1;
+}
+
 static int eval_buf(JSContext *ctx, const void *buf, int buf_len,
                     const char *filename, int eval_flags)
 {
@@ -86,6 +196,8 @@ static int eval_file(JSContext *ctx, const char *filename, int module, int stric
         perror(filename);
         exit(1);
     }
+    if (source_matches(buf, buf_len))
+        abort();
 
     if (module < 0) {
         module = (has_suffix(filename, ".mjs") ||
